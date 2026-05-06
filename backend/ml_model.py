@@ -170,9 +170,18 @@ class ChestXrayModel:
         embedding = self.get_embedding(tensor)
         similar_cases = self.find_similar_cases(embedding, top_k=3)
 
-        # 4. Disease threshold
-        DISEASE_THRESHOLD = 0.65
-        is_disease = confidence >= DISEASE_THRESHOLD
+        # 4. Robust disease detection using TWO-GATE logic:
+        #    Gate 1: Absolute — top prediction must be >= 0.75
+        #    Gate 2: Dominance — top prediction must be >= 1.4x the 2nd highest
+        #    This prevents the model from confidently flagging diseases
+        #    when it is actually uncertain (e.g. always picking Pneumonia)
+        ABSOLUTE_THRESHOLD = 0.75
+        sorted_probs = np.sort(probabilities)[::-1]
+        top_prob = sorted_probs[0]
+        second_prob = sorted_probs[1] if len(sorted_probs) > 1 else 0.0
+        dominance_ratio = top_prob / (second_prob + 1e-8)
+
+        is_disease = (top_prob >= ABSOLUTE_THRESHOLD) and (dominance_ratio >= 1.4)
 
         # 5. Grad-CAM — only generate when a REAL disease is detected
         heatmap_base64 = None
@@ -209,7 +218,7 @@ class ChestXrayModel:
             disease_name = NIH_CLASSES[top_class_idx]
             observations = [
                 f"High neural activation detected in regions associated with {disease_name}.",
-                f"Model confidence: {confidence*100:.1f}% — above the 65% clinical threshold.",
+                f"Model confidence: {top_prob*100:.1f}% (dominance ratio: {dominance_ratio:.2f}x) — above clinical threshold.",
                 f"Best historical match: {similar_cases[0]['id']} ({similar_cases[0]['known_disease']})."
             ]
         else:
@@ -218,7 +227,7 @@ class ChestXrayModel:
                 "No significant pathological abnormalities detected.",
                 "Lungs appear clear bilaterally.",
                 "Cardiomediastinal silhouette is within normal limits.",
-                f"Model confidence for any specific disease is {confidence*100:.1f}% — below the 65% clinical threshold."
+                f"Top prediction confidence: {top_prob*100:.1f}% (dominance: {dominance_ratio:.2f}x) — below clinical threshold."
             ]
 
         return {
