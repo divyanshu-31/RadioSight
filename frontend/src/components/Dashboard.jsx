@@ -74,12 +74,22 @@ export function Dashboard({ originalImage, result, isLoading, onReset }) {
           <div className="image-container">
             <img src={originalImage} alt="Original X-Ray" className="xray-image" />
             
-            {/* Simulated Heatmap Overlay - using a CSS gradient just for mockup purposes if real isn't provided */}
+            {/* Actual AI Heatmap Overlay */}
             {result.heatmapUrl && (
-              <div 
+              <img 
+                src={result.heatmapUrl} 
+                alt="AI Grad-CAM Heatmap"
                 className={`heatmap-overlay ${showHeatmap ? 'visible' : ''}`}
                 style={{
-                  background: 'radial-gradient(circle at 60% 40%, rgba(239, 68, 68, 0.6) 0%, rgba(245, 158, 11, 0.4) 30%, transparent 60%)',
+                  position: 'absolute',
+                  top: 0,
+                  left: 0,
+                  width: '100%',
+                  height: '100%',
+                  objectFit: 'contain',
+                  opacity: showHeatmap ? 0.65 : 0,
+                  transition: 'opacity 0.3s ease-in-out',
+                  mixBlendMode: 'screen'
                 }}
               />
             )}
