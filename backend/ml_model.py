@@ -30,10 +30,14 @@ class ChestXrayModel:
         num_ftrs = self.model.classifier[1].in_features
         self.model.classifier[1] = nn.Linear(num_ftrs, len(NIH_CLASSES))
         
-        # If we had a trained model path, we would load it here
-        if model_path:
-            # self.model.load_state_dict(torch.load(model_path, map_location=self.device))
-            pass
+        # Load our trained NIH model weights if available
+        model_path = 'best_efficientnet_v2_nih.pth'
+        import os
+        if os.path.exists(model_path):
+            self.model.load_state_dict(torch.load(model_path, map_location=self.device))
+            print(f"Loaded trained weights from {model_path}")
+        else:
+            print("WARNING: No trained weights found. Using default ImageNet weights.")
             
         self.model = self.model.to(self.device)
         self.model.eval()
@@ -52,37 +56,72 @@ class ChestXrayModel:
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         ])
 
-        # Feature extractor for embeddings (removing the final classification layer)
-        self.feature_extractor = torch.nn.Sequential(*list(self.model.children())[:-1])
+        # Feature extractor for embeddings:
+        # EfficientNet-V2 = features + avgpool → flatten → 1280-dim vector
+        self.feature_extractor = torch.nn.Sequential(
+            self.model.features,
+            self.model.avgpool
+        )
         self.feature_extractor.eval()
-        
-        # Mocking an in-memory database of NIH embeddings for Similarity Search
-        # In production, this would be loaded from Faiss or MongoDB Atlas Vector Search
-        self._mock_nih_database()
 
-    def _mock_nih_database(self):
-        # Generate 100 random embeddings to represent our historical NIH dataset
-        self.db_embeddings = np.random.randn(100, 1280) # EfficientNet-V2-S outputs 1280 dim
+        # Build REAL NIH embedding database from actual images on disk
+        print("Building real NIH similarity database from disk images...")
+        self._build_real_database()
+
+    def _build_real_database(self):
+        """
+        Computes real 1280-dim EfficientNet-V2 embeddings from actual NIH images.
+        This makes cosine similarity scores clinically meaningful (visual similarity).
+        """
         import pandas as pd
+        import os
+
+        self.db_embeddings = []
+        self.db_metadata = []
+
         try:
-            df = pd.read_csv('sample_labels.csv').head(100)
-            self.db_metadata = []
-            for i, row in df.iterrows():
+            df = pd.read_csv('sample_labels.csv').head(200)
+        except Exception as e:
+            print(f"Could not read sample_labels.csv: {e}")
+            # Fallback to random if CSV missing
+            self.db_embeddings = np.random.randn(50, 1280)
+            self.db_metadata = [{"id": f"NIH-{i}", "disease": NIH_CLASSES[i%14], "severity_score": 0.75} for i in range(50)]
+            return
+
+        loaded = 0
+        for _, row in df.iterrows():
+            img_path = os.path.join('images', row['Image Index'])
+            if not os.path.exists(img_path):
+                continue
+            try:
+                img = Image.open(img_path).convert('RGB')
+                tensor = self.transform(img).unsqueeze(0).to(self.device)
+                emb = self.get_embedding(tensor)
+                self.db_embeddings.append(emb[0])
+
                 disease_str = row['Finding Labels']
                 disease = disease_str.split('|')[0] if disease_str != 'No Finding' else 'No Finding'
+
+                # Severity score based on number of co-occurring conditions
+                num_conditions = len(disease_str.split('|')) if disease_str != 'No Finding' else 0
+                severity = min(0.95, 0.55 + num_conditions * 0.1)
+
                 self.db_metadata.append({
                     "id": row['Image Index'],
                     "disease": disease,
-                    "severity_score": float(np.random.uniform(0.60, 0.99))
+                    "severity_score": float(severity)
                 })
-        except Exception:
-            self.db_metadata = [
-                {
-                    "id": f"NIH-{str(i).zfill(5)}", 
-                    "disease": NIH_CLASSES[i%14],
-                    "severity_score": float(np.random.uniform(0.60, 0.99))
-                } for i in range(100)
-            ]
+                loaded += 1
+            except Exception:
+                continue
+
+        if loaded == 0:
+            print("WARNING: No images found in images/ folder. Using fallback random database.")
+            self.db_embeddings = np.random.randn(50, 1280)
+            self.db_metadata = [{"id": f"NIH-{i}", "disease": NIH_CLASSES[i%14], "severity_score": 0.75} for i in range(50)]
+        else:
+            self.db_embeddings = np.array(self.db_embeddings)
+            print(f"Real database built: {loaded} images with genuine embeddings.")
 
     def get_embedding(self, tensor):
         with torch.no_grad():
@@ -109,60 +148,79 @@ class ChestXrayModel:
         return results
 
     def predict_disease_and_cam(self, image: Image.Image):
-        # 1. Preprocess
-        tensor = self.transform(image).unsqueeze(0).to(self.device)
-        
-        # 2. Prediction
+        # 1. Preprocess — save original dimensions for final heatmap resize
+        orig_w, orig_h = image.size
+        image_rgb = image.convert('RGB')
+        tensor = self.transform(image_rgb).unsqueeze(0).to(self.device)
+
+        # Prepare 224x224 RGB for Grad-CAM (float32 in [0,1])
+        rgb_224 = np.array(image_rgb.resize((224, 224))).astype(np.float32) / 255.0
+        if len(rgb_224.shape) == 2:
+            rgb_224 = np.stack((rgb_224,) * 3, axis=-1)
+
+        # 2. Forward pass
         with torch.no_grad():
             outputs = self.model(tensor)
             probabilities = torch.sigmoid(outputs).cpu().numpy()[0]
-            
-        # Get top predicted class
-        top_class_idx = np.argmax(probabilities)
+
+        top_class_idx = int(np.argmax(probabilities))
         confidence = float(probabilities[top_class_idx])
-        
-        # 3. Embedding & Similarity Search
+
+        # 3. Embedding & Similarity Search using the trained model
         embedding = self.get_embedding(tensor)
         similar_cases = self.find_similar_cases(embedding, top_k=3)
 
-        # 4. Grad-CAM
-        # Convert PIL image to numpy float32 in [0, 1] for Grad-CAM overlay
-        rgb_img = np.array(image.resize((224, 224))).astype(np.float32) / 255.0
-        # If grayscale, convert to RGB shape
-        if len(rgb_img.shape) == 2:
-            rgb_img = np.stack((rgb_img,)*3, axis=-1)
-            
-        targets = [ClassifierOutputTarget(top_class_idx)]
-        
-        # Generate heatmap
-        grayscale_cam = self.cam(input_tensor=tensor, targets=targets)[0, :]
-        
-        # Overlay heatmap on original image using the library's utility
-        # Use colormap cv2.COLORMAP_JET
-        cam_image = show_cam_on_image(rgb_img, grayscale_cam, use_rgb=True, colormap=cv2.COLORMAP_JET)
-        
-        # Convert visualization back to base64 for frontend
-        cam_pil = Image.fromarray(cam_image)
-        buffered = io.BytesIO()
-        cam_pil.save(buffered, format="PNG")
-        heatmap_base64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
+        # 4. Disease threshold
+        DISEASE_THRESHOLD = 0.65
+        is_disease = confidence >= DISEASE_THRESHOLD
 
-        if confidence < 0.50:
+        # 5. Grad-CAM — only generate when a REAL disease is detected
+        heatmap_base64 = None
+        if is_disease:
+            try:
+                targets = [ClassifierOutputTarget(top_class_idx)]
+                grayscale_cam = self.cam(input_tensor=tensor, targets=targets)[0, :]
+
+                # Normalize to prevent black/wash-out
+                grayscale_cam = np.clip(grayscale_cam, 0, None)
+                if grayscale_cam.max() > 0:
+                    grayscale_cam = grayscale_cam / grayscale_cam.max()
+
+                # Generate overlay at 224x224
+                cam_image_224 = show_cam_on_image(
+                    rgb_224,
+                    grayscale_cam,
+                    use_rgb=True,
+                    colormap=cv2.COLORMAP_JET,
+                    image_weight=0.55
+                )
+
+                # Resize heatmap back to ORIGINAL image dimensions so sizes match
+                cam_pil = Image.fromarray(cam_image_224).resize((orig_w, orig_h), Image.LANCZOS)
+                buffered = io.BytesIO()
+                cam_pil.save(buffered, format="PNG")
+                heatmap_base64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
+            except Exception as e:
+                print(f"Grad-CAM generation failed: {e}")
+                heatmap_base64 = None
+
+        # 6. Build response
+        if is_disease:
+            disease_name = NIH_CLASSES[top_class_idx]
+            observations = [
+                f"High neural activation detected in regions associated with {disease_name}.",
+                f"Model confidence: {confidence*100:.1f}% — above the 65% clinical threshold.",
+                f"Best historical match: {similar_cases[0]['id']} ({similar_cases[0]['known_disease']})."
+            ]
+        else:
             disease_name = "No Finding (Normal)"
             observations = [
                 "No significant pathological abnormalities detected.",
                 "Lungs appear clear bilaterally.",
                 "Cardiomediastinal silhouette is within normal limits.",
-                "Model confidence for any specific disease is below the clinical threshold."
+                f"Model confidence for any specific disease is {confidence*100:.1f}% — below the 65% clinical threshold."
             ]
-        else:
-            disease_name = NIH_CLASSES[top_class_idx]
-            observations = [
-                f"High activation in regions associated with {disease_name}.",
-                "Model confidence is strongly localized.",
-                f"Matches feature profile of {similar_cases[0]['id']} from historical database."
-            ]
-        
+
         return {
             "disease": disease_name,
             "confidence": confidence,
