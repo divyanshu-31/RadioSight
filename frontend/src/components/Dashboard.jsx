@@ -72,27 +72,12 @@ export function Dashboard({ originalImage, result, isLoading, onReset }) {
         
         <div style={{ padding: '1.5rem', flex: 1, display: 'flex', flexDirection: 'column' }}>
           <div className="image-container">
-            <img src={originalImage} alt="Original X-Ray" className="xray-image" />
-            
-            {/* Actual AI Heatmap Overlay */}
-            {result.heatmapUrl && (
-              <img 
-                src={result.heatmapUrl} 
-                alt="AI Grad-CAM Heatmap"
-                className={`heatmap-overlay ${showHeatmap ? 'visible' : ''}`}
-                style={{
-                  position: 'absolute',
-                  top: 0,
-                  left: 0,
-                  width: '100%',
-                  height: '100%',
-                  objectFit: 'contain',
-                  opacity: showHeatmap ? 1 : 0,
-                  transition: 'opacity 0.3s ease-in-out',
-                  zIndex: 2
-                }}
-              />
-            )}
+            <img 
+              src={showHeatmap && result.heatmapUrl ? result.heatmapUrl : originalImage} 
+              alt={showHeatmap ? "Grad-CAM Heatmap" : "Original X-Ray"} 
+              className="xray-image"
+              style={{ transition: 'opacity 0.3s ease-in-out' }}
+            />
             
             {!showHeatmap && (
               <div style={{ position: 'absolute', bottom: '1rem', right: '1rem', background: 'rgba(0,0,0,0.6)', padding: '0.5rem 1rem', borderRadius: '20px', fontSize: '0.8rem', backdropFilter: 'blur(4px)' }}>
