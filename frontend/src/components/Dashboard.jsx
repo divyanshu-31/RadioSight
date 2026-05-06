@@ -87,9 +87,9 @@ export function Dashboard({ originalImage, result, isLoading, onReset }) {
                   width: '100%',
                   height: '100%',
                   objectFit: 'contain',
-                  opacity: showHeatmap ? 0.65 : 0,
+                  opacity: showHeatmap ? 1 : 0,
                   transition: 'opacity 0.3s ease-in-out',
-                  mixBlendMode: 'screen'
+                  zIndex: 2
                 }}
               />
             )}
