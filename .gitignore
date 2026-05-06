@@ -1,0 +1,18 @@
+# Node
+frontend/node_modules/
+frontend/dist/
+.env
+
+# Python
+backend/venv/
+backend/__pycache__/
+*.pyc
+*.db
+*.pth
+
+# Datasets (Too large for GitHub limits)
+backend/images/
+backend/sample_labels.csv
+
+# OS
+.DS_Store

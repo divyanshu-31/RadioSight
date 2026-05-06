@@ -1,0 +1,12 @@
+fastapi
+uvicorn
+motor
+torch
+torchvision
+numpy
+Pillow
+python-multipart
+grad-cam
+scikit-learn
+pydantic
+pydantic-settings
